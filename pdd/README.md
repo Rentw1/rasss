@@ -8,6 +8,15 @@
 cd pdd && python3 -m http.server 8000   # http://localhost:8000
 ```
 
+### На свой сервер (VPS) одной командой
+
+```bash
+git clone -b claude/pdd-exam-learning-oel8ty --depth 1 https://github.com/Rentw1/rasss.git /tmp/rasss \
+  && sudo bash /tmp/rasss/pdd/deploy/install.sh        # или: ... install.sh 9123 — свой порт
+```
+
+Скрипт сам найдёт свободный порт (8080, 8081, 8088 …), поставит python3 при необходимости, создаст systemd-сервис `pdd-trainer` с автозапуском, откроет порт в ufw/firewalld и напечатает ссылку `http://IP:порт/`. Повторный запуск обновляет сайт на том же порту.
+
 Хостинг: любой статический (GitHub Pages — workflow `.github/workflows/pdd-pages.yml`, Netlify, nginx). Включить Pages: Settings → Pages → Source: GitHub Actions.
 
 ## Методика (что внутри)
