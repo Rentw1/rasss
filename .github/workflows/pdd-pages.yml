@@ -2,7 +2,7 @@ name: Deploy PDD trainer to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, ccr-95de4bd7-9oodi1]
     paths: ["pdd/**", ".github/workflows/pdd-pages.yml"]
   workflow_dispatch:
 
