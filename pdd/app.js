@@ -42,6 +42,7 @@
   const DEFAULT_SET = {
     cat: "ab", newPer: 20, shuffle: false, examHints: false, autoNext: true,
     speakAuto: false, rate: 1.05, theme: "auto", examDate: "",
+    goal: 60, sound: true, errorless: true,
   };
   const S = {
     set: Object.assign({}, DEFAULT_SET, store.get("set", {})),
@@ -49,6 +50,7 @@
     stats: store.get("stats", { days: {} }),
     exams: store.get("exams", []),
     mar: store.get("mar", {}),
+    game: Object.assign({ xp: 0, ach: {}, best: {} }, store.get("game", {})),
     data: {},
     refs: {},
     view: { name: "home" },
@@ -64,6 +66,7 @@
     store.set("stats", S.stats);
     store.set("exams", S.exams.slice(-200));
     store.set("mar", S.mar);
+    store.set("game", S.game);
   }
   function saveSet() { store.set("set", S.set); }
   window.addEventListener("pagehide", saveNow);
@@ -96,15 +99,23 @@
     const s = Math.max(0, Math.ceil(ms / 1000));
     return String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
   }
-  function toast(text) {
-    const old = $(".toast");
-    if (old) old.remove();
+  const toastQ = [];
+  let toastBusy = false;
+  function toast(text, kind = "") {
+    if (toastQ.length > 3) toastQ.shift();
+    toastQ.push({ text, kind });
+    if (!toastBusy) nextToast();
+  }
+  function nextToast() {
+    const t = toastQ.shift();
+    if (!t) { toastBusy = false; return; }
+    toastBusy = true;
     const el = document.createElement("div");
-    el.className = "toast";
+    el.className = "toast " + t.kind;
     el.setAttribute("role", "status");
-    el.textContent = text;
+    el.textContent = t.text;
     document.body.appendChild(el);
-    setTimeout(() => el.remove(), 2400);
+    setTimeout(() => { el.remove(); nextToast(); }, t.kind ? 2800 : 1900);
   }
   function fmtTip(tip) {
     let h = esc(tip);
@@ -285,6 +296,123 @@
     return n;
   }
 
+  /* ---------- game: XP, ranks, achievements, sound, confetti ---------- */
+  const RANKS = [
+    [0, "Пешеход"], [150, "Ученик автошколы"], [500, "Стажёр"], [1200, "Новичок за рулём"], [2500, "Водитель"],
+    [4500, "Уверенный водитель"], [7500, "Опытный водитель"], [12000, "Профи"], [18000, "Инструктор"], [26000, "Экзаменатор ГИБДД"],
+  ];
+  function rankOf(xp) {
+    let i = 0;
+    while (i + 1 < RANKS.length && xp >= RANKS[i + 1][0]) i++;
+    return { i, lvl: i + 1, name: RANKS[i][1], from: RANKS[i][0], to: RANKS[i + 1] ? RANKS[i + 1][0] : null };
+  }
+  function addXP(n, R) {
+    const before = rankOf(S.game.xp).i;
+    S.game.xp += n;
+    if (R) R.xp = (R.xp || 0) + n;
+    const after = rankOf(S.game.xp);
+    if (after.i > before) {
+      toast(`Новый ранг: ${after.name}`, "ach");
+      beep("pass");
+      celebrate();
+    }
+  }
+  const totalAnswers = () => Object.values(S.stats.days).reduce((a, d) => a + (d.a || 0), 0);
+  function knownShare() {
+    const d = D();
+    if (!d) return 0;
+    let k = 0;
+    d.unique.forEach((q) => { if (box(q) >= 2) k++; });
+    return k / d.unique.length;
+  }
+  const ACH = [
+    { id: "first", t: "Первый шаг", d: "Ответить на первый вопрос", ok: () => totalAnswers() >= 1 },
+    { id: "a100", t: "Сотня", d: "100 ответов", ok: () => totalAnswers() >= 100 },
+    { id: "a500", t: "Пятьсот", d: "500 ответов", ok: () => totalAnswers() >= 500 },
+    { id: "a2000", t: "Железная задница", d: "2000 ответов", ok: () => totalAnswers() >= 2000 },
+    { id: "goal", t: "Норма дня", d: "Выполнить дневную цель", ok: () => ((S.stats.days[today()] || {}).a || 0) >= S.set.goal },
+    { id: "streak3", t: "Три дня подряд", d: "Заниматься 3 дня без пропуска", ok: () => streak() >= 3 },
+    { id: "streak7", t: "Неделя за рулём", d: "Заниматься 7 дней без пропуска", ok: () => streak() >= 7 },
+    { id: "combo10", t: "Комбо ×10", d: "10 верных ответов подряд", ok: () => (S.game.best.combo || 0) >= 10 },
+    { id: "combo30", t: "Неудержимый", d: "30 верных ответов подряд", ok: () => (S.game.best.combo || 0) >= 30 },
+    { id: "topic", t: "Тема закрыта", d: "Выучить все вопросы одной темы", ok: () => D() && D().topics.some((tp) => tp.qs.every((q) => box(q) >= 2)) },
+    { id: "half", t: "Половина пути", d: "Выучить 50% вопросов", ok: () => knownShare() >= 0.5 },
+    { id: "all", t: "Все 800", d: "Выучить все вопросы категории", ok: () => knownShare() >= 1 },
+    { id: "exam1", t: "Первый зачёт", d: "Сдать экзамен", ok: () => S.exams.some((e) => e.ok) },
+    { id: "perfect", t: "Чистый лист", d: "Сдать экзамен без единой ошибки", ok: () => S.exams.some((e) => e.ok && !e.err) },
+    { id: "fast", t: "Молния", d: "Экзамен без ошибок быстрее 5 минут", ok: () => S.exams.some((e) => e.ok && !e.err && e.sec < 300) },
+    { id: "row5", t: "Готов к ГИБДД", d: "5 экзаменов подряд сданы", ok: () => S.exams.length >= 5 && S.exams.slice(-5).every((e) => e.ok) },
+    { id: "t40", t: "Все 40 билетов", d: "Сдать экзамен по каждому билету", ok: () => new Set(S.exams.filter((e) => e.ok && e.cat === S.set.cat).map((e) => e.t)).size >= 40 },
+    { id: "signs", t: "Знаток знаков", d: "20 из 20 в тренажёре знаков", ok: () => (S.game.best.signs || 0) >= 20 },
+    { id: "blitz15", t: "Блиц", d: "15 очков в блице", ok: () => (S.game.best.blitz || 0) >= 15 },
+    { id: "blitz30", t: "Реакция пилота", d: "30 очков в блице", ok: () => (S.game.best.blitz || 0) >= 30 },
+  ];
+  function checkAch() {
+    let any = false;
+    ACH.forEach((a) => {
+      if (S.game.ach[a.id]) return;
+      let ok = false;
+      try { ok = a.ok(); } catch (e) { ok = false; }
+      if (ok) {
+        S.game.ach[a.id] = Date.now();
+        S.game.xp += 50;
+        toast(`Достижение: ${a.t} · +50 XP`, "ach");
+        any = true;
+      }
+    });
+    if (any) { beep("ach"); saveSoon(); }
+  }
+  let actx = null;
+  function beep(kind) {
+    if (!S.set.sound) return;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      actx = actx || new AC();
+      if (actx.state === "suspended") actx.resume();
+      const seq = { ok: [[660, 0.06], [990, 0.09]], no: [[196, 0.18]], ach: [[523, 0.08], [659, 0.08], [784, 0.16]], pass: [[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.25]] }[kind];
+      if (!seq) return;
+      let t = actx.currentTime + 0.01;
+      seq.forEach(([f, dur]) => {
+        const o = actx.createOscillator(), g = actx.createGain();
+        o.type = kind === "no" ? "triangle" : "sine";
+        o.frequency.value = f;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.14, t + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        o.connect(g).connect(actx.destination);
+        o.start(t);
+        o.stop(t + dur + 0.03);
+        t += dur;
+      });
+    } catch (e) { /* audio unavailable */ }
+  }
+  function celebrate() {
+    try { if (matchMedia("(prefers-reduced-motion: reduce)").matches) return; } catch (e) { /* ignore */ }
+    const c = document.createElement("canvas");
+    c.className = "confetti";
+    c.setAttribute("aria-hidden", "true");
+    document.body.appendChild(c);
+    const w = c.width = innerWidth, h = c.height = innerHeight;
+    const ctx = c.getContext("2d");
+    const colors = ["#d0202e", "#1457b4", "#f2b705", "#11804a", "#ffffff"];
+    const parts = Array.from({ length: 140 }, () => ({
+      x: w / 2 + (Math.random() - 0.5) * w * 0.3, y: h * 0.35, vx: (Math.random() - 0.5) * 14, vy: -Math.random() * 14 - 4,
+      s: 4 + Math.random() * 6, r: Math.random() * 6, vr: (Math.random() - 0.5) * 0.4, c: pick(colors),
+    }));
+    const t0 = performance.now();
+    (function frame(now) {
+      const k = (now - t0) / 1800;
+      ctx.clearRect(0, 0, w, h);
+      parts.forEach((p) => {
+        p.vy += 0.45; p.x += p.vx; p.y += p.vy; p.r += p.vr;
+        ctx.save(); ctx.globalAlpha = Math.max(0, 1 - k); ctx.translate(p.x, p.y); ctx.rotate(p.r);
+        ctx.fillStyle = p.c; ctx.fillRect(-p.s / 2, -p.s / 4, p.s, p.s / 2); ctx.restore();
+      });
+      if (k < 1) requestAnimationFrame(frame); else c.remove();
+    })(t0);
+  }
+
   /* ---------- speech ---------- */
   const tts = {
     ok: typeof window.speechSynthesis !== "undefined" && typeof window.SpeechSynthesisUtterance !== "undefined",
@@ -352,6 +480,7 @@
         <span class="brand-name">Билеты ПДД</span>
       </button>
       <span class="bar-sp"></span>
+      <button class="lvl" data-act="achievements" aria-label="Ранг и достижения"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2c1 4 5 6 5 11a5 5 0 0 1-10 0c0-2 1-3.5 2-4.5 0 2 1 3 2 3 0-3-1-6 1-9.5Z" fill="#f28a05"/></svg><b class="num">${streak()}</b><span class="lvl-n">Ур. ${rankOf(S.game.xp).lvl}</span></button>
       <div class="seg" role="group" aria-label="Категория">
         <button data-act="cat" data-v="ab" aria-pressed="${S.set.cat === "ab"}">ABM</button>
         <button data-act="cat" data-v="cd" aria-pressed="${S.set.cat === "cd"}">CD</button>
@@ -418,8 +547,11 @@
             <button class="btn primary big" data-act="${due || fresh ? "learn" : "exam"}">${learnLabel}</button>
             <button class="btn big" data-act="exam">Экзамен 20 мин</button>
           </div>
+          <label class="switch small"><input type="checkbox" id="errorless-home" data-act="errorless" ${S.set.errorless ? "checked" : ""}> Режим «с нуля»: новый вопрос сначала показывается с ответом, потом вы отвечаете сами</label>
         </div>
       </section>
+
+      ${progressCard(td)}
 
       <section class="modes" aria-label="Режимы">
         <button class="mode" data-act="mistakes"><b>Ошибки</b><span><span class="cnt">${mist}</span> ${plural(mist, "вопрос", "вопроса", "вопросов")} до закрепления</span></button>
@@ -428,6 +560,8 @@
         <button class="mode" data-act="cheat"><b>Шпаргалка</b><span>Все цифры и запреты на одной странице</span></button>
         <button class="mode" data-act="signs"><b>Знаки и разметка</b><span>Справочник и тренажёр знаков</span></button>
         <button class="mode" data-act="listen" data-src="mistakes"><b>Слушать</b><span>Аудиоповтор ошибок: вопрос, ответ, пояснение</span></button>
+        <button class="mode" data-act="blitz"><b>Блиц 90 секунд</b><span>3 жизни, на скорость. Рекорд: <span class="cnt">${S.game.best.blitz || 0}</span></span></button>
+        <button class="mode" data-act="achievements"><b>Достижения</b><span><span class="cnt">${Object.keys(S.game.ach).length}</span> из ${ACH.length} получено</span></button>
       </section>
 
       <section class="card stack" aria-label="Билеты">
@@ -450,8 +584,60 @@
           <li><b>Честно жмите «Угадал».</b> Случайный правильный ответ не считается выученным.</li>
           <li><b>Повторения по расписанию.</b> 10 минут → 1 день → 3 → 7 → 14 дней. Приложение само подставит нужные вопросы.</li>
           <li><b>Последние 2 дня — только экзамены и «Ошибки».</b> Цель: 5 экзаменов подряд без ошибок.</li>
+          <li><b>Совсем с нуля?</b> Оставьте включённым режим «с нуля»: новый вопрос сначала показывается с ответом, через 3 вопроса вы отвечаете сами. Так меньше случайных ошибок и правильный ответ запоминается быстрее.</li>
+          <li><b>Держите ритм.</b> Цель дня, серия дней и ранги показывают, что вы продвигаетесь. Блиц на 90 секунд — разминка, когда нет сил на сессию.</li>
           <li><b>Если память слабая:</b> включите озвучку, читайте пояснение вслух, слушайте «Ошибки» в дороге, учите 2–3 короткие сессии в день вместо одной длинной, перед сном — повтор.</li>
         </ol>
+      </section>
+    </div>`;
+  };
+
+  function progressCard(td) {
+    const r = rankOf(S.game.xp);
+    const pct = r.to ? ((S.game.xp - r.from) / (r.to - r.from)) * 100 : 100;
+    const goal = Math.max(1, +S.set.goal || 60);
+    const g = Math.min(1, (td.a || 0) / goal);
+    const C = 2 * Math.PI * 26;
+    const cells = [];
+    const start = new Date();
+    start.setHours(12, 0, 0, 0);
+    start.setDate(start.getDate() - (7 * 15 + ((start.getDay() + 6) % 7)));
+    for (let i = 0; i < 16 * 7; i++) {
+      const d = new Date(start.getTime());
+      d.setDate(start.getDate() + i);
+      const k = dayKey(d.getTime());
+      const a = (S.stats.days[k] || {}).a || 0;
+      const l = d > new Date() ? -1 : a >= 100 ? 4 : a >= 50 ? 3 : a >= 20 ? 2 : a > 0 ? 1 : 0;
+      cells.push(`<i data-h="${l}" title="${k}: ${a}"></i>`);
+    }
+    return `<section class="card prog" aria-label="Прогресс">
+      <div class="ring" role="img" aria-label="Цель дня: ${td.a || 0} из ${goal}">
+        <svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="26" class="ring-bg"/>${g > 0 ? `<circle cx="32" cy="32" r="26" class="ring-fg" stroke-dasharray="${(C * g).toFixed(1)} ${C.toFixed(1)}" transform="rotate(-90 32 32)"/>` : ""}</svg>
+        <div><b class="num">${td.a || 0}</b><span>из ${goal}</span></div>
+      </div>
+      <div class="prog-main">
+        <div class="plan-line"><div><span class="label">Ранг · уровень ${r.lvl}</span><h2>${esc(r.name)}</h2></div><span class="num small muted">${S.game.xp} XP${r.to ? ` / ${r.to}` : ""}</span></div>
+        <div class="xp"><i style="width:${pct.toFixed(1)}%"></i></div>
+        <div class="heat" aria-label="Активность за 16 недель">${cells.join("")}</div>
+      </div>
+    </section>`;
+  }
+
+  VIEWS.achievements = () => {
+    const r = rankOf(S.game.xp);
+    app().innerHTML = `<div class="stack">
+      <div class="row"><button class="btn ghost" data-act="home">← Назад</button></div>
+      <section class="card stack">
+        <div><span class="label">${S.game.xp} XP · уровень ${r.lvl}</span><h1>${esc(r.name)}</h1></div>
+        <p class="small muted">Очки: верный ответ +10 и бонус за комбо до +10, ошибка +2, сданный экзамен +100 (без ошибок +200), достижение +50.</p>
+        <div class="ranks">${RANKS.map(([xp, name], i) => `<div class="rank ${i <= r.i ? "on" : ""}"><b class="num">${i + 1}</b><span>${esc(name)}</span><em class="num">${xp}</em></div>`).join("")}</div>
+      </section>
+      <section class="card stack">
+        <h2>Достижения · ${Object.keys(S.game.ach).length} из ${ACH.length}</h2>
+        <div class="achs">${ACH.map((a) => {
+          const at = S.game.ach[a.id];
+          return `<div class="ach ${at ? "on" : ""}"><svg viewBox="0 0 40 40" aria-hidden="true"><path d="M20 3 37 34H3Z" class="ach-tri"/><path d="m13 22 5 5 9-11" class="ach-check"/></svg><div><b>${esc(a.t)}</b><span>${esc(a.d)}${at ? ` · ${new Date(at).toLocaleDateString("ru-RU")}` : ""}</span></div></div>`;
+        }).join("")}</div>
       </section>
     </div>`;
   };
@@ -527,7 +713,8 @@
   }
   function startRunner(kind, title, qs, opts = {}) {
     if (!qs.length) { toast("Здесь пока нет вопросов"); return; }
-    go({ name: "run", R: Object.assign({ kind, title, items: qs.map((q) => makeItem(q)), pos: 0, started: Date.now(), done: 0 }, opts) });
+    const study = opts.studyIds || null;
+    go({ name: "run", R: Object.assign({ kind, title, items: qs.map((q) => makeItem(q, study && study.has(q.id) ? { study: true, first: false } : {})), pos: 0, started: Date.now(), done: 0 }, opts) });
   }
   function startLearn(pool) {
     const d = D();
@@ -551,7 +738,8 @@
       toast(pool ? "В этой теме всё выучено — решайте подряд" : "На сегодня всё выучено. Решите экзамен.");
       return;
     }
-    startRunner("learn", pool ? "Учить тему" : "Учить сейчас", seq, { learnPool: pool || null });
+    const studyIds = S.set.errorless ? new Set(fresh.map((q) => q.id)) : null;
+    startRunner("learn", pool ? "Учить тему" : "Учить сейчас", seq, { learnPool: pool || null, studyIds });
   }
   function startExam(ticket) {
     const d = D();
@@ -566,7 +754,9 @@
     const q = it.q;
     const answered = it.res != null;
     const exam = R.kind === "exam";
-    const showFb = answered && (!exam || S.set.examHints);
+    const blitz = R.kind === "blitz";
+    const study = it.study && !answered;
+    const showFb = study || (answered && (!exam || S.set.examHints));
     const ok = answered && it.res === q.c;
     const total = R.items.length;
     const doneCount = R.items.filter((x) => x.res != null).length;
@@ -578,6 +768,8 @@
         const st = x.res == null ? "" : S.set.examHints ? (x.res === x.q.c ? "ok" : "no") : "done";
         return `<button class="${cls} ${st}" data-act="jump" data-i="${i}" aria-label="Вопрос ${i + 1}">${i + 1}</button>`;
       }).join("")}</div>`;
+    } else if (blitz) {
+      head = `<div class="qhead"><span class="label">Блиц · 90 секунд</span><span class="sp"></span><span class="lives" aria-label="Жизни: ${R.lives}">${[0, 1, 2].map((i) => `<i class="${i < R.lives ? "on" : ""}"></i>`).join("")}</span><span class="chip good num">${R.score} очк.</span><span class="timer num" id="timer">${fmtTime(R.deadline - Date.now())}</span></div>`;
     } else if (R.kind === "learn") {
       head = `<div class="qhead"><span class="label">${esc(R.title)} · билет ${q.t}, вопрос ${q.n}</span><span class="sp"></span><span class="small muted num">${doneCount}/${total}</span></div>
       <div class="progress"><i style="width:${(doneCount / total) * 100}%"></i></div>`;
@@ -590,25 +782,35 @@
         head += `<div class="progress"><i style="width:${((R.pos + 1) / total) * 100}%"></i></div>`;
       }
     }
-    const tag = it.need > 0 && !answered ? `<span class="chip bad">Повтор ошибки</span>` : box(q) < 0 && !answered && R.kind === "learn" ? `<span class="chip warn">Новый</span>` : "";
+    let tag = study ? `<span class="chip warn">Новый вопрос — запомните ответ</span>` : it.need > 0 && !answered ? `<span class="chip bad">Повтор ошибки</span>` : box(q) < 0 && !answered && R.kind === "learn" ? `<span class="chip warn">Новый</span>` : "";
+    if (!exam && (R.combo || 0) >= 3) tag += `<span class="chip combo">Комбо ×${R.combo}</span>`;
     const answersHtml = it.ord.map((ai, k) => {
       let cls = "";
-      if (answered) {
+      if (study) cls = ai === q.c ? "right" : "dim";
+      else if (answered) {
         if (showFb) {
           if (ai === q.c) cls = "right";
           else if (ai === it.res) cls = "wrong";
           else cls = "dim";
         } else if (ai === it.res) cls = "picked";
       }
-      return `<button class="ans ${cls}" data-act="answer" data-a="${ai}" ${answered ? "disabled" : ""}><span class="k">${k + 1}</span><span>${esc(q.a[ai])}</span></button>`;
+      return `<button class="ans ${cls}" data-act="answer" data-a="${ai}" ${answered || study ? "disabled" : ""}><span class="k">${k + 1}</span><span>${esc(q.a[ai])}</span></button>`;
     }).join("");
     let fb = "";
-    if (showFb) {
+    if (study) {
+      fb = `<div class="tip">${fmtTip(q.tip)}</div><p class="small muted">Через несколько вопросов он вернётся — ответите сами.</p>`;
+    } else if (showFb && blitz) {
+      fb = `<div class="verdict ${ok ? "ok" : "no"}" role="status">${ok ? "+1" : "Минус жизнь"}</div>`;
+    } else if (showFb) {
       fb = `<div class="verdict ${ok ? "ok" : "no"}" role="status">${ok ? (it.guessed ? "Засчитано как ошибка — повторим" : "Верно") : "Ошибка"}</div>
       <div class="tip">${fmtTip(q.tip)}</div>`;
     }
     const actions = [];
-    if (!answered) {
+    if (study) {
+      actions.push(`<button class="btn ghost" data-act="say-a">Озвучить ответ</button><span class="sp"></span><button class="btn primary" data-act="studied" id="next-btn">Запомнил</button>`);
+    } else if (blitz) {
+      if (answered) actions.push(`<span class="sp"></span><button class="btn primary" data-act="next" id="next-btn">Дальше</button>`);
+    } else if (!answered) {
       if (exam) actions.push(`<button class="btn" data-act="skip">Пропустить</button>`);
       actions.push(`<button class="btn ghost" data-act="say-q" aria-label="Прочитать вопрос вслух">Озвучить</button>`);
     } else {
@@ -616,7 +818,7 @@
       if (showFb) actions.push(`<button class="btn ghost" data-act="say-a">Озвучить ответ</button>`);
       actions.push(`<span class="sp"></span><button class="btn primary" data-act="next" id="next-btn">Дальше</button>`);
     }
-    if (!answered) actions.push(`<span class="sp"></span>`);
+    if (!answered && !study) actions.push(`<span class="sp"></span>`);
     actions.push(`<button class="btn ghost danger" data-act="quit">${v.confirmQuit ? "Точно выйти?" : "Выйти"}</button>`);
 
     app().innerHTML = `<div class="stack">
@@ -629,26 +831,27 @@
           <div class="answers">${answersHtml}</div>
           ${fb}
           <div class="qactions">${actions.join("")}</div>
-          <p class="hint-keys">Клавиши: <span class="kbd">1</span>–<span class="kbd">${q.a.length}</span> ответ, <span class="kbd">Enter</span> дальше${!exam ? `, <span class="kbd">G</span> угадал` : ""}</p>
+          <p class="hint-keys">${study ? `<span class="kbd">Enter</span> — запомнил` : `Клавиши: <span class="kbd">1</span>–<span class="kbd">${q.a.length}</span> ответ, <span class="kbd">Enter</span> дальше${!exam && !blitz ? `, <span class="kbd">G</span> угадал` : ""}`}</p>
         </div>
       </article>
     </div>`;
 
-    if (exam) {
+    if (exam || blitz) {
       const tick = () => {
         const left = R.deadline - Date.now();
         const el = $("#timer");
-        if (el) { el.textContent = fmtTime(left); el.classList.toggle("low", left < 3 * MIN); }
-        if (left <= 0 && R.status === "run") finishExam(R, false, "Время вышло");
+        if (el) { el.textContent = fmtTime(left); el.classList.toggle("low", left < (blitz ? 15e3 : 3 * MIN)); }
+        if (left <= 0 && R.status === "run") blitz ? finishBlitz(R, "Время вышло") : finishExam(R, false, "Время вышло");
       };
       clearInterval(timerId);
       timerId = setInterval(tick, 1000);
     }
     const nextItems = R.items.slice(R.pos + 1, R.pos + 4);
     nextItems.forEach((x) => { if (x.q.img) imgChunk(x.q.cat, x.q.t).catch(() => {}); });
-    if (!answered && S.set.speakAuto) tts.speak(qSpeech(q));
-    if (showFb && S.set.speakAuto) tts.speak((ok ? "Верно. " : "Ошибка. ") + aSpeech(q));
-    if (answered && showFb && ok && S.set.autoNext && !exam && !S.set.speakAuto) {
+    if (study && S.set.speakAuto) tts.speak(`${q.q}. ${aSpeech(q)}`);
+    else if (!answered && S.set.speakAuto && !blitz) tts.speak(qSpeech(q));
+    if (answered && showFb && S.set.speakAuto && !blitz) tts.speak((ok ? "Верно. " : "Ошибка. ") + aSpeech(q));
+    if (answered && showFb && ok && S.set.autoNext && !exam && !blitz && !S.set.speakAuto) {
       const pos = R.pos;
       v.autoTimer = setTimeout(() => { if (S.view === v && R.pos === pos && R.items[pos].res != null && !R.items[pos].guessed) nextQuestion(); }, 1100);
     }
@@ -657,11 +860,36 @@
   function answer(ai) {
     const v = S.view, R = v.R;
     const it = R.items[R.pos];
-    if (it.res != null || (R.kind === "exam" && R.status !== "run")) return;
+    if (it.res != null || it.study || ((R.kind === "exam" || R.kind === "blitz") && R.status !== "run")) return;
     tts.stop();
     it.res = ai;
     const q = it.q;
     const ok = ai === q.c;
+    const prevGoal = (S.stats.days[today()] || {}).a || 0;
+    if (R.kind !== "exam") {
+      R.combo = ok ? (R.combo || 0) + 1 : 0;
+      R.maxCombo = Math.max(R.maxCombo || 0, R.combo);
+      if (R.combo > (S.game.best.combo || 0)) S.game.best.combo = R.combo;
+      addXP(ok ? 10 + Math.min(R.combo, 10) : 2, R);
+      beep(ok ? "ok" : "no");
+    } else {
+      addXP(ok ? 10 : 2, R);
+    }
+    afterAnswer(prevGoal);
+    if (R.kind === "blitz") {
+      grade(q, ok);
+      if (ok) R.score++;
+      else R.lives--;
+      if (R.pos + 6 > R.items.length) R.items.push(...R.pool.splice(0, 20).map((x) => makeItem(x)));
+      render();
+      const pos = R.pos;
+      v.autoTimer = setTimeout(() => {
+        if (S.view !== v || R.pos !== pos) return;
+        if (R.lives <= 0) finishBlitz(R, "Жизни закончились");
+        else nextQuestion();
+      }, ok ? 550 : 1500);
+      return;
+    }
     if (R.kind === "learn") {
       if (it.first) it.snap = grade(q, ok);
       else if (!ok) grade(q, false);
@@ -679,6 +907,38 @@
     const nb = $("#next-btn");
     if (nb) nb.focus({ preventScroll: true });
   }
+  function afterAnswer(prevGoal) {
+    const now = (S.stats.days[today()] || {}).a || 0;
+    if (prevGoal < S.set.goal && now >= S.set.goal) { toast("Дневная цель выполнена!", "ach"); celebrate(); }
+    checkAch();
+  }
+  function studied() {
+    const v = S.view, R = v.R, it = R.items[R.pos];
+    if (!it.study || it.res != null) return;
+    it.res = it.q.c;
+    addXP(3, R);
+    const at = Math.min(R.items.length, R.pos + 4);
+    R.items.splice(at, 0, makeItem(it.q, { first: true }));
+    nextQuestion();
+  }
+  function startBlitz() {
+    const d = D();
+    const pool = shuffle(d.unique);
+    const now = Date.now();
+    go({ name: "run", R: { kind: "blitz", title: "Блиц", items: pool.splice(0, 30).map((q) => makeItem(q)), pool, pos: 0, started: now, deadline: now + 90e3, lives: 3, score: 0, status: "run", done: 0 } });
+  }
+  function finishBlitz(R, reason) {
+    if (R.status !== "run") return;
+    R.status = "done";
+    clearInterval(timerId);
+    const rec = R.score > (S.game.best.blitz || 0);
+    if (rec) S.game.best.blitz = R.score;
+    addXP(R.score * 3, R);
+    checkAch();
+    saveNow();
+    if (rec && R.score > 0) { beep("pass"); celebrate(); }
+    go({ name: "result", R, ok: null, reason, record: rec });
+  }
   function requeue(R, q, need, gap) {
     const at = Math.min(R.items.length, R.pos + 1 + gap);
     R.items.splice(at, 0, makeItem(q, { need, first: false }));
@@ -690,6 +950,7 @@
     if (it.snap) undoGrade(it.q, it.snap);
     grade(it.q, false);
     it.guessed = true;
+    R.combo = 0;
     if (R.kind === "learn") requeue(R, it.q, 2, 3);
     saveSoon();
     render();
@@ -699,6 +960,14 @@
     clearTimeout(v.autoTimer);
     tts.stop();
     if (R.kind === "exam") { advanceExam(R); return; }
+    if (R.kind === "blitz") {
+      if (R.status !== "run") return;
+      if (R.lives <= 0) { finishBlitz(R, "Жизни закончились"); return; }
+      R.pos++;
+      render();
+      window.scrollTo(0, 0);
+      return;
+    }
     if (R.pos + 1 < R.items.length) {
       R.pos++;
       if (R.kind === "marathon") { S.mar[S.set.cat].pos = R.offset + R.pos; saveSoon(); }
@@ -748,7 +1017,11 @@
     if (R.status !== "run") return;
     R.status = ok ? "pass" : "fail";
     clearInterval(timerId);
-    S.exams.push({ cat: S.set.cat, t: R.ticket, ok, ts: Date.now(), err: R.items.filter((x) => x.res != null && x.res !== x.q.c).length, sec: Math.round((Date.now() - R.started) / 1000) });
+    const err = R.items.filter((x) => x.res != null && x.res !== x.q.c).length;
+    S.exams.push({ cat: S.set.cat, t: R.ticket, ok, ts: Date.now(), err, sec: Math.round((Date.now() - R.started) / 1000) });
+    if (ok) { addXP(err ? 100 : 200, R); beep("pass"); celebrate(); }
+    else addXP(20, R);
+    checkAch();
     saveNow();
     go({ name: "result", R, ok, reason });
   }
@@ -769,6 +1042,7 @@
     const exam = R.kind === "exam";
     let headline, cls;
     if (exam) { headline = v.ok ? "Сдал" : "Не сдал"; cls = v.ok ? "ok" : "no"; }
+    else if (R.kind === "blitz") { headline = `${R.score} ${plural(R.score, "очко", "очка", "очков")}`; cls = v.record ? "ok" : ""; }
     else { headline = `${right} из ${firstTry.length}`; cls = wrong.length ? "" : "ok"; }
     const d = D();
     const dueLeft = dueList(d).length;
@@ -778,12 +1052,14 @@
     if (exam) buttons.push(`<button class="btn ${wrong.length ? "" : "primary"}" data-act="exam">Новый экзамен</button>`);
     if (R.kind === "learn") buttons.push(`<button class="btn ${wrong.length ? "" : "primary"}" data-act="${R.learnPool ? "learn-topic" : "learn"}" ${R.learnPool ? `data-ti="${R.learnTi}"` : ""}>Ещё порция</button>`);
     if (R.kind === "marathon") buttons.push(`<button class="btn" data-act="marathon">Продолжить марафон</button>`);
+    if (R.kind === "blitz") buttons.push(`<button class="btn ${wrong.length ? "" : "primary"}" data-act="blitz">Ещё блиц</button>`);
     buttons.push(`<button class="btn ghost" data-act="home">На главную</button>`);
     app().innerHTML = `<div class="stack">
       <section class="card stack">
         <span class="label">${esc(R.title)}</span>
         <div class="res-big ${cls}">${headline}</div>
-        <p class="muted">${exam ? esc(v.reason) + " · " : ""}время ${fmtTime(secs * 1000)} · ошибок ${wrong.length}${R.kind === "learn" ? ` · к повтору сейчас ${dueLeft}, новых осталось ${freshLeft}` : ""}</p>
+        <div class="row"><span class="chip combo">+${R.xp || 0} XP</span>${R.maxCombo >= 3 ? `<span class="chip">Лучшее комбо ×${R.maxCombo}</span>` : ""}${R.kind === "blitz" ? `<span class="chip ${v.record ? "good" : ""}">${v.record ? "Новый рекорд!" : `Рекорд: ${S.game.best.blitz || 0}`}</span>` : ""}</div>
+        <p class="muted">${exam || R.kind === "blitz" ? esc(v.reason) + " · " : ""}время ${fmtTime(secs * 1000)} · ошибок ${wrong.length}${R.kind === "learn" ? ` · к повтору сейчас ${dueLeft}, новых осталось ${freshLeft}` : ""}</p>
         <div class="row">${buttons.join("")}</div>
       </section>
       ${wrong.length ? `<section class="card stack"><h2>Разбор ошибок</h2>${wrong.map((x) => `<div class="review-item">
@@ -1090,6 +1366,14 @@
     const cur = v.items[v.pos];
     if (!cur) {
       const ok = v.items.filter((x) => x.res === x.it.t).length;
+      if (!v.scored) {
+        v.scored = true;
+        if (ok > (S.game.best.signs || 0)) S.game.best.signs = ok;
+        addXP(ok * 3);
+        checkAch();
+        saveNow();
+        if (ok >= 18) celebrate();
+      }
       app().innerHTML = `<div class="stack"><section class="card stack"><span class="label">Тренажёр знаков</span><div class="res-big ${ok >= 18 ? "ok" : ""}">${ok} из ${v.items.length}</div>
         <div class="row"><button class="btn primary" data-act="signquiz">Ещё 20 знаков</button><button class="btn" data-act="signs">Справочник</button><button class="btn ghost" data-act="home">На главную</button></div></section>
         ${v.items.filter((x) => x.res !== x.it.t).map((x) => `<section class="card row"><img src="${x.it.img}" alt="" style="width:64px;height:64px;object-fit:contain;background:#fff;border-radius:6px"><div style="min-width:0;flex:1"><b class="num">${esc(x.it.n)}</b> ${esc(x.it.t)}<p class="small muted">${esc(x.it.d)}</p></div></section>`).join("")}</div>`;
@@ -1117,13 +1401,16 @@
 
   /* ----- settings ----- */
   VIEWS.settings = (v) => {
-    const exported = v.showExport ? JSON.stringify({ v: 1, prog: S.prog, stats: S.stats, exams: S.exams }) : "";
+    const exported = v.showExport ? JSON.stringify({ v: 1, prog: S.prog, stats: S.stats, exams: S.exams, game: S.game }) : "";
     app().innerHTML = `<div class="stack">
       <div class="row"><button class="btn ghost" data-act="home">← Назад</button></div>
       <section class="card stack">
         <h1>Настройки</h1>
         <div class="field"><label for="examDate">Дата экзамена</label><input id="examDate" type="date" value="${esc(S.set.examDate)}" data-set="examDate"><span class="small muted">По ней считается дневная норма; интервалы повторения сжимаются, чтобы всё повторить до экзамена.</span></div>
         <div class="field"><label for="newPer">Новых вопросов в одной порции</label><select id="newPer" data-set="newPer">${[10, 15, 20, 30, 40, 60].map((n) => `<option value="${n}" ${+S.set.newPer === n ? "selected" : ""}>${n}</option>`).join("")}</select></div>
+        <div class="field"><label for="goal">Цель дня, ответов</label><select id="goal" data-set="goal">${[30, 60, 100, 150, 200, 300].map((n) => `<option value="${n}" ${+S.set.goal === n ? "selected" : ""}>${n}</option>`).join("")}</select></div>
+        <label class="switch"><input type="checkbox" id="errorless" data-set="errorless" ${S.set.errorless ? "checked" : ""}> Режим «с нуля»: новый вопрос сначала с ответом</label>
+        <label class="switch"><input type="checkbox" id="sound" data-set="sound" ${S.set.sound ? "checked" : ""}> Звуки</label>
         <label class="switch"><input type="checkbox" id="autoNext" data-set="autoNext" ${S.set.autoNext ? "checked" : ""}> Сразу дальше после верного ответа</label>
         <label class="switch"><input type="checkbox" id="shuffle" data-set="shuffle" ${S.set.shuffle ? "checked" : ""}> Перемешивать варианты ответов (учит смысл, а не позицию)</label>
         <label class="switch"><input type="checkbox" id="examHints" data-set="examHints" ${S.set.examHints ? "checked" : ""}> Показывать ответы во время экзамена</label>
@@ -1209,12 +1496,17 @@
       const v = S.view, cur = v.items[v.pos];
       if (cur.res != null) return;
       cur.res = cur.opts[+el.dataset.k];
+      beep(cur.res === cur.it.t ? "ok" : "no");
       render();
     },
     "sq-next": () => { S.view.pos++; render(); window.scrollTo(0, 0); },
     answer: (el) => answer(+el.dataset.a),
     next: () => nextQuestion(),
     guessed: () => markGuessed(),
+    studied: () => studied(),
+    blitz: () => startBlitz(),
+    achievements: () => go({ name: "achievements" }),
+    errorless: () => { S.set.errorless = !S.set.errorless; saveSet(); toast(S.set.errorless ? "Режим «с нуля» включён" : "Режим «с нуля» выключен"); render(); },
     skip: () => advanceExam(S.view.R),
     jump: (el) => {
       const R = S.view.R;
@@ -1227,6 +1519,7 @@
       const examRunning = R.kind === "exam" && R.status === "run";
       if (examRunning && !v.confirmQuit) { v.confirmQuit = true; render(); return; }
       if (examRunning) { finishExam(R, false, "Экзамен прерван"); return; }
+      if (R.kind === "blitz" && R.status === "run") { finishBlitz(R, "Остановлено"); return; }
       if (R.items.some((x) => x.res != null)) finishRunner(R);
       else go({ name: "home" });
     },
@@ -1268,6 +1561,11 @@
         });
         S.prog = Object.assign(S.prog, clean2);
         if (obj.stats && obj.stats.days && typeof obj.stats.days === "object") Object.assign(S.stats.days, obj.stats.days);
+        if (obj.game && Number.isFinite(obj.game.xp)) {
+          S.game.xp = Math.max(S.game.xp, obj.game.xp);
+          if (obj.game.ach && typeof obj.game.ach === "object") Object.entries(obj.game.ach).forEach(([k, t]) => { if (ACH.some((a) => a.id === k) && Number.isFinite(t)) S.game.ach[k] = S.game.ach[k] || t; });
+          if (obj.game.best && typeof obj.game.best === "object") ["combo", "blitz", "signs"].forEach((k) => { if (Number.isFinite(obj.game.best[k])) S.game.best[k] = Math.max(S.game.best[k] || 0, obj.game.best[k]); });
+        }
         if (Array.isArray(obj.exams)) S.exams = S.exams.concat(obj.exams.filter((e) => e && typeof e.t === "number")).sort((a, b) => a.ts - b.ts);
         saveNow();
         toast(`Загружено ${Object.keys(clean2).length} вопросов`);
@@ -1277,7 +1575,7 @@
     reset: () => {
       const v = S.view;
       if (!v.confirmReset) { v.confirmReset = true; render(); return; }
-      S.prog = {}; S.stats = { days: {} }; S.exams = []; S.mar = {};
+      S.prog = {}; S.stats = { days: {} }; S.exams = []; S.mar = {}; S.game = { xp: 0, ach: {}, best: {} };
       saveNow();
       toast("Прогресс сброшен");
       go({ name: "home" });
@@ -1296,6 +1594,7 @@
       const k = el.dataset.set;
       let val = el.type === "checkbox" ? el.checked : el.value;
       if (k === "newPer") val = Math.max(5, Math.min(100, parseInt(val, 10) || 20));
+      if (k === "goal") val = Math.max(10, Math.min(1000, parseInt(val, 10) || 60));
       if (k === "examDate" && val && !/^\d{4}-\d{2}-\d{2}$/.test(val)) val = "";
       S.set[k] = val;
       saveSet();
@@ -1322,12 +1621,16 @@
     const v = S.view;
     if (v.name === "run") {
       const R = v.R, it = R.items[R.pos];
+      if (it.study && it.res == null) {
+        if (e.key === "Enter" || e.key === " " || e.key === "ArrowRight") { e.preventDefault(); studied(); }
+        return;
+      }
       if (/^[1-5]$/.test(e.key)) {
         const k = +e.key - 1;
         if (it.res == null && k < it.ord.length) { e.preventDefault(); answer(it.ord[k]); }
       } else if ((e.key === "Enter" || e.key === " " || e.key === "ArrowRight") && it.res != null) {
         e.preventDefault(); nextQuestion();
-      } else if ((e.key === "g" || e.key === "п" || e.key === "G" || e.key === "П") && R.kind !== "exam") {
+      } else if ((e.key === "g" || e.key === "п" || e.key === "G" || e.key === "П") && R.kind !== "exam" && R.kind !== "blitz") {
         markGuessed();
       }
     } else if (v.name === "signquiz" && v.items) {
@@ -1352,7 +1655,7 @@
       }
     }
     const hash = (location.hash || "").slice(1);
-    const deep = { exam: () => startExam(0), learn: () => startLearn(null), cheat: () => go({ name: "cheat" }), signs: () => go({ name: "signs", tab: "signs" }), topics: () => go({ name: "topics" }), mistakes: () => ACTIONS.mistakes() };
+    const deep = { exam: () => startExam(0), learn: () => startLearn(null), cheat: () => go({ name: "cheat" }), signs: () => go({ name: "signs", tab: "signs" }), topics: () => go({ name: "topics" }), mistakes: () => ACTIONS.mistakes(), blitz: () => startBlitz(), achievements: () => go({ name: "achievements" }) };
     S.view = { name: "home" };
     render();
     if (deep[hash]) deep[hash]();
